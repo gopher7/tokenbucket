@@ -2,7 +2,6 @@ package tokenbucket
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 )
@@ -12,11 +11,11 @@ var ErrOverflow = errors.New("overflow")
 
 // TokenBucket 令牌桶
 type TokenBucket struct {
-	lastModifiedTime time.Time     // 上次修改时间
-	storedTokens     uint64        // 桶中存储的令牌数
-	count            uint64        // 每inter时间内产生count个令牌
-	inter            time.Duration // 产生count个令牌的时间
-	maxTokens        uint64        // 最大的令牌数
+	lastModifiedTime int64  // 上次修改时间
+	storedTokens     uint64 // 桶中存储的令牌数
+	count            uint64 // 每inter时间内产生count个令牌
+	inter            int64  // 产生count个令牌的时间
+	maxTokens        uint64 // 最大的令牌数
 	sync.RWMutex
 }
 
@@ -24,45 +23,45 @@ type TokenBucket struct {
 func New(count uint64, inter time.Duration, maxTokens uint64, tokensNow uint64, startTime time.Time) *TokenBucket {
 	return &TokenBucket{
 		count:            count,
-		inter:            inter,
+		inter:            inter.Nanoseconds(),
 		maxTokens:        maxTokens,
 		storedTokens:     tokensNow,
-		lastModifiedTime: startTime,
+		lastModifiedTime: startTime.UnixNano(),
 	}
 }
 
-// Reserve 预约count个令牌，err == nil 表示成功，否则失败
-func (b *TokenBucket) Reserve(count uint64, now time.Time) (err error) {
+// Reserve 预约count个令牌，返回是否预约成功
+func (b *TokenBucket) Reserve(count uint64) bool {
+	return b.ReserveWithTime(count, time.Now())
+}
+
+// ReserveWithTime 预约count个令牌，err == nil 表示成功，否则失败
+func (b *TokenBucket) ReserveWithTime(count uint64, now time.Time) bool {
 	if count <= 0 {
-		return
+		return true
 	}
 
 	b.Lock()
 
-	err = b.sync(now)
-	if err != nil {
-		b.Unlock()
-		return
-	}
+	b.sync(now.UnixNano())
 
 	storedTokens := b.storedTokens
 	if storedTokens < count {
-		err = fmt.Errorf("reserve %d, but only %d", count, storedTokens)
 		b.Unlock()
-		return
+		return false
 	}
 	b.storedTokens -= count
 	b.Unlock()
-	return
+	return true
 }
 
 // 同步状态到now时间点
-func (b *TokenBucket) sync(now time.Time) (err error) {
-	diff := now.Sub(b.lastModifiedTime)
+func (b *TokenBucket) sync(nowNano int64) {
+	diff := nowNano - b.lastModifiedTime
 	if diff < 0 {
 		return
 	}
-	tokensToPut := uint64(diff.Nanoseconds()/b.inter.Nanoseconds()) * b.count
+	tokensToPut := uint64(diff/b.inter) * b.count
 	if tokensToPut < 1 {
 		return
 	}
@@ -73,10 +72,9 @@ func (b *TokenBucket) sync(now time.Time) (err error) {
 		}
 		b.storedTokens = sum
 	} else {
-		err = fmt.Errorf("overflow: %d + %d", b.storedTokens, tokensToPut)
 		return
 	}
-	b.lastModifiedTime = now
+	b.lastModifiedTime = nowNano
 	return
 }
 
@@ -91,31 +89,20 @@ func (b *TokenBucket) checkedAddUint64(n1, n2 uint64) (sum uint64, err error) {
 
 // SetRate 设置令牌产生的速度为rate。
 // 当前时间之前，令牌产生速度按照之前的设置。
-func (b *TokenBucket) SetRate(count uint64, inter time.Duration) (err error) {
+func (b *TokenBucket) SetRate(count uint64, inter time.Duration) {
 	b.Lock()
 	// 先将状态更新到当前时间，然后在设置速度
-	now := time.Now()
-	err = b.sync(now)
-	if err != nil {
-		b.Unlock()
-		return
-	}
+	b.sync(time.Now().UnixNano())
 	b.count = count
-	b.inter = inter
+	b.inter = inter.Nanoseconds()
 	b.Unlock()
-	return
 }
 
 // SetMaxTokens 设置最大令牌数
-func (b *TokenBucket) SetMaxTokens(max uint64) (err error) {
+func (b *TokenBucket) SetMaxTokens(max uint64) {
 	b.Lock()
 	// 先将状态更新到当前时间，然后在设置速度
-	now := time.Now()
-	err = b.sync(now)
-	if err != nil {
-		b.Unlock()
-		return
-	}
+	b.sync(time.Now().UnixNano())
 	b.maxTokens = max
 	b.Unlock()
 	return
@@ -124,9 +111,7 @@ func (b *TokenBucket) SetMaxTokens(max uint64) (err error) {
 // GetStoredTokensNow 获取当前存储的令牌数，该方法会将令牌桶同步到当前时间点。
 func (b *TokenBucket) GetStoredTokensNow() (tokens uint64) {
 	b.Lock()
-
-	now := time.Now()
-	b.sync(now)
+	b.sync(time.Now().UnixNano())
 	tokens = b.storedTokens
 	b.Unlock()
 	return
